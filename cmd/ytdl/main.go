@@ -13,11 +13,11 @@ import (
 
 	"github.com/cheggaaa/pb"
 	"github.com/codegangsta/cli"
+	"github.com/deoxxa/ytdl"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
-	"github.com/rylio/ytdl"
-	log "github.com/sirupsen/logrus"
 	"github.com/olekukonko/tablewriter"
+	log "github.com/sirupsen/logrus"
 )
 
 type options struct {
@@ -104,18 +104,18 @@ func main() {
 			cli.ShowAppHelp(c)
 		} else {
 			options := options{
-				noProgress:  c.Bool("no-progress"),
-				outputFile:  c.String("output"),
-				infoOnly:    c.Bool("info"),
-				silent:      c.Bool("silent"),
-				debug:       c.Bool("debug"),
-				append:      c.Bool("append"),
-				filters:     c.StringSlice("filter"),
-				downloadURL: c.Bool("download-url"),
-				byteRange:   c.String("range"),
-				json:        c.Bool("json"),
-				startOffset: c.String("start-offset"),
-				downloadOption:      c.Bool("download-option"),
+				noProgress:     c.Bool("no-progress"),
+				outputFile:     c.String("output"),
+				infoOnly:       c.Bool("info"),
+				silent:         c.Bool("silent"),
+				debug:          c.Bool("debug"),
+				append:         c.Bool("append"),
+				filters:        c.StringSlice("filter"),
+				downloadURL:    c.Bool("download-url"),
+				byteRange:      c.String("range"),
+				json:           c.Bool("json"),
+				startOffset:    c.String("start-offset"),
+				downloadOption: c.Bool("download-option"),
 			}
 			if len(options.filters) == 0 {
 				options.filters = cli.StringSlice{
@@ -158,10 +158,10 @@ func handler(identifier string, options options) {
 	// ouput only errors or not
 	silent := options.outputFile == "" ||
 		options.silent || options.infoOnly || options.downloadURL || options.json
-	if silent {
-		log.SetLevel(log.FatalLevel)
-	} else if options.debug {
+	if options.debug {
 		log.SetLevel(log.DebugLevel)
+	} else if silent {
+		log.SetLevel(log.FatalLevel)
 	} else {
 		log.SetLevel(log.InfoLevel)
 	}
