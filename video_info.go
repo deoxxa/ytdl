@@ -98,7 +98,7 @@ func GetVideoInfoFromID(id string) (*VideoInfo, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Invalid status code: %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTML page invalid status code; expected 200 but got %d", resp.StatusCode)
 	}
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -132,7 +132,7 @@ func (info *VideoInfo) Download(format Format, dest io.Writer) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("Invalid status code: %d", resp.StatusCode)
+		return fmt.Errorf("Download invalid status code; expected 2xx but got %d", resp.StatusCode)
 	}
 	_, err = io.Copy(dest, resp.Body)
 	return err
@@ -214,7 +214,7 @@ func getVideoInfoFromHTML(id string, html []byte) (*VideoInfo, error) {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("Video info response invalid status code")
+			return nil, fmt.Errorf("Video info response invalid status code; expected 200 but got %d", resp.StatusCode)
 		}
 		body, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
@@ -239,11 +239,32 @@ func getVideoInfoFromHTML(id string, html []byte) (*VideoInfo, error) {
 	}
 
 	if playerResponseJSON, ok := inf["player_response"].(string); ok {
+		// fmt.Printf("%s\n", playerResponseJSON)
+
 		var playerResponse struct {
 			PlayabilityStatus struct {
 				Status string `json:"status"`
 				Reason string `json:"reason"`
 			} `json:"playabilityStatus"`
+			VideoDetails struct {
+				VideoID       string   `json:"videoId"`
+				Title         string   `json:"title"`
+				LengthSeconds string   `json:"lengthSeconds"`
+				Author        string   `json:"author"`
+				Keywords      []string `json:"keywords"`
+			} `json:"videoDetails"`
+			StreamingData struct {
+				ExpiresInSeconds string `json:"expiresInSeconds"`
+				Formats          []struct {
+					ITag int    `json:"itag"`
+					URL  string `json:"url"`
+				} `json:"formats"`
+				AdaptiveFormats []struct {
+					ITag int    `json:"itag"`
+					URL  string `json:"url"`
+				} `json:"adaptiveFormats"`
+			} `json:"streamingData"`
+			DashManifestURL string `json:"dashManifestUrl"`
 		}
 
 		if err := json.Unmarshal([]byte(playerResponseJSON), &playerResponse); err != nil {
@@ -253,24 +274,68 @@ func getVideoInfoFromHTML(id string, html []byte) (*VideoInfo, error) {
 		if playerResponse.PlayabilityStatus.Status != "OK" {
 			return nil, fmt.Errorf("Unavailable because: %s", playerResponse.PlayabilityStatus.Reason)
 		}
+
+		if playerResponse.VideoDetails.Author != "" {
+			info.Author = playerResponse.VideoDetails.Author
+		}
+
+		if playerResponse.VideoDetails.LengthSeconds != "" {
+			if seconds, err := strconv.ParseInt(playerResponse.VideoDetails.LengthSeconds, 10, 64); err == nil {
+				info.Duration = time.Second * time.Duration(seconds)
+			} else {
+				log.Debug("Unable to parse duration string: ", playerResponse.VideoDetails.LengthSeconds)
+			}
+		}
+
+		if len(playerResponse.VideoDetails.Keywords) > 0 {
+			info.Keywords = playerResponse.VideoDetails.Keywords
+		}
+
+		for _, e := range playerResponse.StreamingData.Formats {
+			format, ok := newFormat(e.ITag)
+			if !ok {
+				log.Debug("No metadata found for itag: ", e.ITag, ", skipping...")
+				continue
+			}
+
+			format.meta["url"] = e.URL
+
+			info.Formats = append(info.Formats, format)
+		}
+
+		for _, e := range playerResponse.StreamingData.AdaptiveFormats {
+			format, ok := newFormat(e.ITag)
+			if !ok {
+				log.Debug("No metadata found for itag: ", e.ITag, ", skipping...")
+				continue
+			}
+
+			format.meta["url"] = e.URL
+
+			info.Formats = append(info.Formats, format)
+		}
 	} else {
 		log.Debug("Unable to extract player response JSON")
 	}
 
-	if a, ok := inf["author"].(string); ok {
-		info.Author = a
-	} else {
-		log.Debug("Unable to extract author")
+	if info.Author == "" {
+		if a, ok := inf["author"].(string); ok {
+			info.Author = a
+		} else {
+			log.Debug("Unable to extract author")
+		}
 	}
 
-	if length, ok := inf["length_seconds"].(string); ok {
-		if duration, err := strconv.ParseInt(length, 10, 64); err == nil {
-			info.Duration = time.Second * time.Duration(duration)
+	if info.Duration == 0 {
+		if length, ok := inf["length_seconds"].(string); ok {
+			if duration, err := strconv.ParseInt(length, 10, 64); err == nil {
+				info.Duration = time.Second * time.Duration(duration)
+			} else {
+				log.Debug("Unable to parse duration string: ", length)
+			}
 		} else {
-			log.Debug("Unable to parse duration string: ", length)
+			log.Debug("Unable to extract duration")
 		}
-	} else {
-		log.Debug("Unable to extract duration")
 	}
 
 	// For the future maybe
@@ -288,7 +353,11 @@ func getVideoInfoFromHTML(id string, html []byte) (*VideoInfo, error) {
 		}
 		return vals
 	}
-	info.Keywords = parseKey("keywords")
+
+	if len(info.Keywords) == 0 {
+		info.Keywords = parseKey("keywords")
+	}
+
 	info.htmlPlayerFile = jsonConfig["assets"].(map[string]interface{})["js"].(string)
 
 	/*
@@ -315,37 +384,49 @@ func getVideoInfoFromHTML(id string, html []byte) (*VideoInfo, error) {
 			}
 		}
 	*/
+
 	var formatStrings []string
-	if fmtStreamMap, ok := inf["url_encoded_fmt_stream_map"].(string); ok {
-		formatStrings = append(formatStrings, strings.Split(fmtStreamMap, ",")...)
+
+	if s, ok := inf["url_encoded_fmt_stream_map"].(string); ok {
+		formatStrings = append(formatStrings, strings.Split(s, ",")...)
+	}
+	if s, ok := inf["adaptive_fmts"].(string); ok {
+		formatStrings = append(formatStrings, strings.Split(s, ",")...)
 	}
 
-	if adaptiveFormats, ok := inf["adaptive_fmts"].(string); ok {
-		formatStrings = append(formatStrings, strings.Split(adaptiveFormats, ",")...)
-	}
 	var formats FormatList
 	for _, v := range formatStrings {
 		query, err := url.ParseQuery(v)
-		if err == nil {
-			itag, _ := strconv.Atoi(query.Get("itag"))
-			if format, ok := newFormat(itag); ok {
-				if strings.HasPrefix(query.Get("conn"), "rtmp") {
-					format.meta["rtmp"] = true
-				}
-				for k, v := range query {
-					if len(v) == 1 {
-						format.meta[k] = v[0]
-					} else {
-						format.meta[k] = v
-					}
-				}
-				formats = append(formats, format)
-			} else {
-				log.Debug("No metadata found for itag: ", itag, ", skipping...")
-			}
-		} else {
-			log.Debug("Unable to format string", err.Error())
+		if err != nil {
+			log.Debug("Unable to parse format string", err.Error())
+			continue
 		}
+
+		itag, err := strconv.Atoi(query.Get("itag"))
+		if err != nil {
+			log.Debug("Unable to parse itag string", err.Error())
+			continue
+		}
+
+		format, ok := newFormat(itag)
+		if !ok {
+			log.Debug("No metadata found for itag: ", itag, ", skipping...")
+			continue
+		}
+
+		if strings.HasPrefix(query.Get("conn"), "rtmp") {
+			format.meta["rtmp"] = true
+		}
+
+		for k, v := range query {
+			if len(v) == 1 {
+				format.meta[k] = v[0]
+			} else {
+				format.meta[k] = v
+			}
+		}
+
+		formats = append(formats, format)
 	}
 
 	if dashManifestURL, ok := inf["dashmpd"].(string); ok {
@@ -353,11 +434,14 @@ func getVideoInfoFromHTML(id string, html []byte) (*VideoInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("Unable to extract signature tokens: %s", err.Error())
 		}
+
 		regex := regexp.MustCompile("\\/s\\/([a-fA-F0-9\\.]+)")
 		regexSub := regexp.MustCompile("([a-fA-F0-9\\.]+)")
+
 		dashManifestURL = regex.ReplaceAllStringFunc(dashManifestURL, func(str string) string {
 			return "/signature/" + decipherTokens(tokens, regexSub.FindString(str))
 		})
+
 		dashFormats, err := getDashManifest(dashManifestURL)
 		if err != nil {
 			return nil, fmt.Errorf("Unable to extract dash manifest: %s", err.Error())
@@ -365,6 +449,7 @@ func getVideoInfoFromHTML(id string, html []byte) (*VideoInfo, error) {
 
 		for _, dashFormat := range dashFormats {
 			added := false
+
 			for j, format := range formats {
 				if dashFormat.Itag == format.Itag {
 					formats[j] = dashFormat
@@ -372,12 +457,15 @@ func getVideoInfoFromHTML(id string, html []byte) (*VideoInfo, error) {
 					break
 				}
 			}
+
 			if !added {
 				formats = append(formats, dashFormat)
 			}
 		}
 	}
-	info.Formats = formats
+
+	info.Formats = append(info.Formats, formats...)
+
 	return info, nil
 }
 
@@ -395,7 +483,7 @@ func getDashManifest(urlString string) (formats []Format, err error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Invalid status code %d", resp.StatusCode)
+		return nil, fmt.Errorf("Dash manifest invalid status code; expected 200 but got %d", resp.StatusCode)
 	}
 	dec := xml.NewDecoder(resp.Body)
 	var token xml.Token
